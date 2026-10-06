@@ -17,11 +17,23 @@ const ADMIN_CHAT_ID = parseInt(process.env.ADMIN_CHAT_ID);
 const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
 const GROQ_API_KEY = process.env.GROQ_API_KEY;
 
-// Настройки пользователей (голосовой ответ вкл/выкл)
+// Настройки пользователей
 const userSettings = new Map();
+const userVoice = new Map();
+
+const AVAILABLE_VOICES = {
+  'дмитрий 🇷🇺': 'ru-RU-DmitryNeural',
+  'светлана 🇷🇺': 'ru-RU-SvetlanaNeural',
+  'остап 🇺🇦': 'uk-UA-OstapNeural',
+  'полина 🇺🇦': 'uk-UA-PolinaNeural',
+};
 
 function getVoiceMode(userId) {
-  return userSettings.get(userId) ?? true; // по умолчанию включено
+  return userSettings.get(userId) ?? true;
+}
+
+function getUserVoice(userId) {
+  return userVoice.get(userId) ?? 'ru-RU-DmitryNeural';
 }
 
 // Хранилище контекста диалогов
@@ -37,11 +49,14 @@ function getUserContext(userId) {
 // Синтез речи через Microsoft Edge TTS (Python)
 const __dirname = path.dirname(new URL(import.meta.url).pathname);
 
-async function textToSpeech(text) {
+async function textToSpeech(text, voice = 'ru-RU-DmitryNeural') {
+  if (text.length > 1000) {
+    text = text.substring(0, 997) + '...';
+  }
   const tmpFile = path.join(os.tmpdir(), `tts_${Date.now()}.mp3`);
   const scriptPath = path.join(__dirname, 'tts.py');
 
-  const child = execFile('python3', [scriptPath, tmpFile], { timeout: 15000 });
+  const child = execFile('python3', [scriptPath, tmpFile, voice], { timeout: 60000 });
   child.stdin.write(text);
   child.stdin.end();
 
@@ -110,7 +125,7 @@ async function sendReply(ctx, text) {
 
   if (getVoiceMode(ctx.from.id)) {
     try {
-      const audioBuffer = await textToSpeech(text);
+      const audioBuffer = await textToSpeech(text, getUserVoice(ctx.from.id));
       await ctx.replyWithVoice({ source: audioBuffer, filename: 'reply.mp3' });
     } catch (err) {
       console.error('Ошибка TTS:', err.message);
@@ -126,6 +141,7 @@ bot.command('start', (ctx) => {
     'Бот запущен! Я могу отвечать на вопросы текстом и голосом.\n\n' +
     'Команды:\n' +
     '/voice — включить/выключить голосовые ответы\n' +
+    '/setvoice — выбрать голос (Дмитрий, Светлана, Дария)\n' +
     '/send <текст> — отправить сообщение в группу\n' +
     '/chatid — показать ID чата'
   );
@@ -135,6 +151,27 @@ bot.command('voice', (ctx) => {
   const current = getVoiceMode(ctx.from.id);
   userSettings.set(ctx.from.id, !current);
   ctx.reply(`Голосовые ответы: ${!current ? '🔊 включены' : '🔇 выключены'}`);
+});
+
+bot.command('setvoice', (ctx) => {
+  const current = getUserVoice(ctx.from.id);
+  const buttons = Object.entries(AVAILABLE_VOICES).map(([name, id]) => {
+    const label = id === current ? `✅ ${name}` : name;
+    return [{ text: label, callback_data: `voice_${name}` }];
+  });
+  ctx.reply('Выбери голос:', {
+    reply_markup: { inline_keyboard: buttons },
+  });
+});
+
+bot.action(/^voice_(.+)$/, (ctx) => {
+  const name = ctx.match[1];
+  const voice = AVAILABLE_VOICES[name];
+  if (voice) {
+    userVoice.set(ctx.from.id, voice);
+    ctx.answerCbQuery(`Голос: ${name} 🔊`);
+    ctx.editMessageText(`Голос изменён на: ${name} 🔊`);
+  }
 });
 
 bot.command('chatid', (ctx) => {
@@ -199,6 +236,14 @@ bot.on('message', async (ctx) => {
 
 bot.launch();
 console.log('Бот запущен!');
+
+bot.telegram.setMyCommands([
+  { command: 'start', description: 'Запуск бота и список команд' },
+  { command: 'voice', description: 'Вкл/выкл голосовые ответы' },
+  { command: 'setvoice', description: 'Выбрать голос' },
+  { command: 'send', description: 'Отправить сообщение в группу' },
+  { command: 'chatid', description: 'Показать ID чата' },
+]).catch(() => {});
 
 if (ADMIN_CHAT_ID) {
   bot.telegram.sendMessage(ADMIN_CHAT_ID, 'Бот запущен!').catch(() => {});
