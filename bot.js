@@ -4,13 +4,14 @@ import 'dotenv/config';
 const bot = new Telegraf(process.env.BOT_TOKEN);
 
 let groupChatId = -5157172835;
+const ADMIN_CHAT_ID = parseInt(process.env.ADMIN_CHAT_ID);
 
 bot.command('start', (ctx) => {
   ctx.reply('Бот запущен! Добавь меня в группу и дай права админа.');
 });
 
 bot.command('chatid', (ctx) => {
-  ctx.reply(`Chat ID этой группы: ${ctx.chat.id}`);
+  ctx.reply(`Chat ID: ${ctx.chat.id}`);
 });
 
 bot.command('send', async (ctx) => {
@@ -40,6 +41,10 @@ bot.on('message', (ctx) => {
 
 bot.launch();
 console.log('Бот запущен!');
+
+if (ADMIN_CHAT_ID) {
+  bot.telegram.sendMessage(ADMIN_CHAT_ID, 'Бот запущен!').catch(() => {});
+}
 
 process.once('SIGINT', () => bot.stop('SIGINT'));
 process.once('SIGTERM', () => bot.stop('SIGTERM'));
