@@ -54,8 +54,7 @@ bot.on('message', async (ctx) => {
       console.log('Получено голосовое сообщение:', file_id);
       
       // Скачиваем голосовое сообщение
-      const file = await bot.telegram.getFile(file_id);
-      const fileUrl = await file.getFileLink(process.env.BOT_TOKEN);
+      const fileUrl = await bot.telegram.getFileLink(file_id);
       
       // Скачиваем аудио
       const response = await axios.get(fileUrl, { responseType: 'arraybuffer' });
