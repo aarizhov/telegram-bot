@@ -12,6 +12,19 @@ const bot = new Telegraf(process.env.BOT_TOKEN);
 let groupChatId = -5157172835;
 const ADMIN_CHAT_ID = parseInt(process.env.ADMIN_CHAT_ID);
 
+// Хранилище контекста диалогов (по ID пользователя)
+const conversationContext = new Map();
+
+// Функция для получения контекста пользователя
+function getUserContext(userId) {
+  if (!conversationContext.has(userId)) {
+    conversationContext.set(userId, [
+      { role: 'system', content: 'Ты дружелюбный помощник. Сохраняй контекст диалога.' }
+    ]);
+  }
+  return conversationContext.get(userId).slice(-10); // Берём до 10 последних сообщений
+}
+
 bot.command('start', (ctx) => {
   ctx.reply('Бот запущен! Добавь меня в группу и дай права админа.');
 });
@@ -67,13 +80,18 @@ bot.on('message', async (ctx) => {
       // Если есть OpenRouter API ключ, можем использовать LLM для ответа
       if (OPENROUTER_API_KEY) {
         try {
+          const userContext = getUserContext(ctx.from.id);
+          const messages = [
+            ...userContext,
+            { role: 'user', content: 'Пользователь отправил голосовое сообщение. Дай короткий вежливый ответ.' }
+          ];
+          
           const response = await axios.post(
             'https://openrouter.ai/api/v1/chat/completions',
             {
-              model: 'google/gemini-2.0-flash',
-              messages: [
-                { role: 'user', content: 'Пользователь отправил голосовое сообщение. Дай короткий вежливый текстовый ответ.' }
-              ]
+              model: 'openai/gpt-3.5-turbo',  // Бесплатная модель OpenRouter
+              messages: messages,
+              max_tokens: 100
             },
             {
               headers: {
@@ -86,8 +104,13 @@ bot.on('message', async (ctx) => {
           );
           
           botReply = response.data.choices[0]?.message?.content || botReply;
-          console.log('OpenRouter response:', botReply);
-        } catch (err) {
+           console.log('OpenRouter response:', botReply);
+           
+           // Сохраняем ответ в контекст
+           const userCtx = conversationContext.get(ctx.from.id) || [];
+           userCtx.push({ role: 'assistant', content: botReply });
+           conversationContext.set(ctx.from.id, userCtx.slice(-10));
+         } catch (err) {
           console.log('OpenRouter API error:', err.message);
           if (err.response) {
             console.log('Error details:', JSON.stringify(err.response.data, null, 2));
