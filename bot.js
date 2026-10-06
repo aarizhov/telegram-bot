@@ -16,24 +16,30 @@ let groupChatId = -5157172835;
 const ADMIN_CHAT_ID = parseInt(process.env.ADMIN_CHAT_ID);
 const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
 const GROQ_API_KEY = process.env.GROQ_API_KEY;
+const STT_MODE = process.env.STT_MODE || 'api';   // 'local' или 'api'
+const TTS_MODE = process.env.TTS_MODE || 'api';   // 'local' или 'api'
+
+const __dirname = path.dirname(new URL(import.meta.url).pathname);
 
 // Настройки пользователей
 const userSettings = new Map();
 const userVoice = new Map();
 
-const AVAILABLE_VOICES = {
-  'дмитрий 🇷🇺': 'ru-RU-DmitryNeural',
-  'светлана 🇷🇺': 'ru-RU-SvetlanaNeural',
-  'остап 🇺🇦': 'uk-UA-OstapNeural',
-  'полина 🇺🇦': 'uk-UA-PolinaNeural',
-};
+const AVAILABLE_VOICES = TTS_MODE === 'local'
+  ? { 'ирина 🇷🇺 (локально)': 'local' }
+  : {
+      'дмитрий 🇷🇺': 'ru-RU-DmitryNeural',
+      'светлана 🇷🇺': 'ru-RU-SvetlanaNeural',
+      'остап 🇺🇦': 'uk-UA-OstapNeural',
+      'полина 🇺🇦': 'uk-UA-PolinaNeural',
+    };
 
 function getVoiceMode(userId) {
   return userSettings.get(userId) ?? true;
 }
 
 function getUserVoice(userId) {
-  return userVoice.get(userId) ?? 'ru-RU-DmitryNeural';
+  return userVoice.get(userId) ?? Object.values(AVAILABLE_VOICES)[0];
 }
 
 // Хранилище контекста диалогов
@@ -46,13 +52,34 @@ function getUserContext(userId) {
   return conversationContext.get(userId).slice(-50);
 }
 
-// Синтез речи через Microsoft Edge TTS (Python)
-const __dirname = path.dirname(new URL(import.meta.url).pathname);
+// ========== TTS ==========
 
-async function textToSpeech(text, voice = 'ru-RU-DmitryNeural') {
-  if (text.length > 1000) {
-    text = text.substring(0, 997) + '...';
-  }
+// Локальный TTS через Piper
+async function textToSpeechLocal(text) {
+  if (text.length > 1000) text = text.substring(0, 997) + '...';
+  const tmpFile = path.join(os.tmpdir(), `tts_${Date.now()}.wav`);
+  const scriptPath = path.join(__dirname, 'tts_local.py');
+
+  const child = execFile('python3', [scriptPath, tmpFile], { timeout: 60000 });
+  child.stdin.write(text);
+  child.stdin.end();
+
+  await new Promise((resolve, reject) => {
+    child.on('close', (code) => {
+      if (code === 0) resolve();
+      else reject(new Error(`Local TTS exited with code ${code}`));
+    });
+    child.on('error', reject);
+  });
+
+  const audioBuffer = fs.readFileSync(tmpFile);
+  fs.unlinkSync(tmpFile);
+  return audioBuffer;
+}
+
+// API TTS через Edge TTS
+async function textToSpeechAPI(text, voice = 'ru-RU-DmitryNeural') {
+  if (text.length > 1000) text = text.substring(0, 997) + '...';
   const tmpFile = path.join(os.tmpdir(), `tts_${Date.now()}.mp3`);
   const scriptPath = path.join(__dirname, 'tts.py');
 
@@ -63,7 +90,7 @@ async function textToSpeech(text, voice = 'ru-RU-DmitryNeural') {
   await new Promise((resolve, reject) => {
     child.on('close', (code) => {
       if (code === 0) resolve();
-      else reject(new Error(`TTS exited with code ${code}`));
+      else reject(new Error(`Edge TTS exited with code ${code}`));
     });
     child.on('error', reject);
   });
@@ -73,10 +100,31 @@ async function textToSpeech(text, voice = 'ru-RU-DmitryNeural') {
   return audioBuffer;
 }
 
-// Распознавание речи через Groq Whisper
-async function recognizeSpeech(audioBuffer, filename) {
+async function textToSpeech(text, voice) {
+  if (TTS_MODE === 'local') {
+    return textToSpeechLocal(text);
+  }
+  return textToSpeechAPI(text, voice);
+}
+
+// ========== STT ==========
+
+// Локальный STT через Whisper
+async function recognizeSpeechLocal(audioBuffer) {
+  const tmpFile = path.join(os.tmpdir(), `stt_${Date.now()}.ogg`);
+  fs.writeFileSync(tmpFile, audioBuffer);
+
+  const scriptPath = path.join(__dirname, 'stt.py');
+  const { stdout } = await execFileAsync('python3', [scriptPath, tmpFile], { timeout: 120000 });
+
+  fs.unlinkSync(tmpFile);
+  return stdout.trim();
+}
+
+// API STT через Groq Whisper
+async function recognizeSpeechAPI(audioBuffer) {
   const form = new FormData();
-  form.append('file', audioBuffer, { filename: filename || 'voice.ogg', contentType: 'audio/ogg' });
+  form.append('file', audioBuffer, { filename: 'voice.ogg', contentType: 'audio/ogg' });
   form.append('model', 'whisper-large-v3');
   form.append('language', 'ru');
 
@@ -91,7 +139,15 @@ async function recognizeSpeech(audioBuffer, filename) {
   return response.data.text;
 }
 
-// Ответ через OpenRouter AI
+async function recognizeSpeech(audioBuffer) {
+  if (STT_MODE === 'local') {
+    return recognizeSpeechLocal(audioBuffer);
+  }
+  return recognizeSpeechAPI(audioBuffer);
+}
+
+// ========== AI ==========
+
 async function getAIReply(userId, userMessage) {
   if (!OPENROUTER_API_KEY) return null;
 
@@ -119,29 +175,37 @@ async function getAIReply(userId, userMessage) {
   return reply;
 }
 
-// Отправка ответа — текстом или голосом
+// ========== Ответ ==========
+
 async function sendReply(ctx, text) {
   if (!text) return;
 
   if (getVoiceMode(ctx.from.id)) {
     try {
+      console.log(`TTS: ${TTS_MODE} | Текст: "${text.substring(0, 50)}${text.length > 50 ? '...' : ''}"`);
       const audioBuffer = await textToSpeech(text, getUserVoice(ctx.from.id));
-      await ctx.replyWithVoice({ source: audioBuffer, filename: 'reply.mp3' });
+      const ext = TTS_MODE === 'local' ? 'wav' : 'mp3';
+      console.log(`TTS: отправлено (${(audioBuffer.length / 1024).toFixed(1)} KB)`);
+      await ctx.replyWithVoice({ source: audioBuffer, filename: `reply.${ext}` });
     } catch (err) {
       console.error('Ошибка TTS:', err.message);
-      await ctx.reply(text); // fallback на текст
+      await ctx.reply(text);
     }
   } else {
     await ctx.reply(text);
   }
 }
 
+// ========== Команды ==========
+
 bot.command('start', (ctx) => {
+  const mode = `STT: ${STT_MODE === 'local' ? '🖥 локальный Whisper' : '☁️ Groq API'} | TTS: ${TTS_MODE === 'local' ? '🖥 локальный Piper' : '☁️ Edge TTS'}`;
   ctx.reply(
     'Бот запущен! Я могу отвечать на вопросы текстом и голосом.\n\n' +
+    `Режим: ${mode}\n\n` +
     'Команды:\n' +
     '/voice — включить/выключить голосовые ответы\n' +
-    '/setvoice — выбрать голос (Дмитрий, Светлана, Дария)\n' +
+    '/setvoice — выбрать голос\n' +
     '/send <текст> — отправить сообщение в группу\n' +
     '/chatid — показать ID чата'
   );
@@ -190,8 +254,9 @@ bot.command('send', async (ctx) => {
   }
 });
 
+// ========== Обработка сообщений ==========
+
 bot.on('message', async (ctx) => {
-  // Запоминаем группу
   if (ctx.chat.type === 'group' || ctx.chat.type === 'supergroup') {
     if (groupChatId !== ctx.chat.id) {
       groupChatId = ctx.chat.id;
@@ -200,15 +265,14 @@ bot.on('message', async (ctx) => {
     return;
   }
 
-  // Голосовое сообщение
   if (ctx.message.voice) {
     try {
-      console.log('Получено голосовое сообщение');
       const fileLink = await bot.telegram.getFileLink(ctx.message.voice.file_id);
       const response = await axios.get(fileLink.href, { responseType: 'arraybuffer' });
       const audioBuffer = Buffer.from(response.data);
+      console.log(`STT: ${STT_MODE} | Получено голосовое (${(audioBuffer.length / 1024).toFixed(1)} KB)`);
 
-      const recognizedText = await recognizeSpeech(audioBuffer, 'voice.ogg');
+      const recognizedText = await recognizeSpeech(audioBuffer);
       console.log('Распознано:', recognizedText);
 
       await ctx.reply(`🎤 "${recognizedText}"`);
@@ -222,7 +286,6 @@ bot.on('message', async (ctx) => {
     return;
   }
 
-  // Текстовое сообщение (только в личке)
   if (ctx.message.text && ctx.chat.type === 'private') {
     try {
       const aiReply = await getAIReply(ctx.from.id, ctx.message.text);
@@ -235,7 +298,7 @@ bot.on('message', async (ctx) => {
 });
 
 bot.launch();
-console.log('Бот запущен!');
+console.log(`Бот запущен! STT: ${STT_MODE} | TTS: ${TTS_MODE}`);
 
 bot.telegram.setMyCommands([
   { command: 'start', description: 'Запуск бота и список команд' },
