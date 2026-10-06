@@ -1,6 +1,5 @@
 import { Telegraf } from 'telegraf';
 import 'dotenv/config';
-import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import axios from 'axios';
@@ -56,7 +55,7 @@ bot.on('message', async (ctx) => {
       
       // Скачиваем голосовое сообщение
       const file = await bot.telegram.getFile(file_id);
-      const fileUrl = file.getFileLink(process.env.BOT_TOKEN);
+      const fileUrl = await file.getFileLink(process.env.BOT_TOKEN);
       
       // Скачиваем аудио
       const response = await axios.get(fileUrl, { responseType: 'arraybuffer' });
