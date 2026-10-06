@@ -1,32 +1,140 @@
 import { Telegraf } from 'telegraf';
 import 'dotenv/config';
-import path from 'path';
-import { fileURLToPath } from 'url';
 import axios from 'axios';
+import FormData from 'form-data';
+import { execFile } from 'child_process';
+import { promisify } from 'util';
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
+const execFileAsync = promisify(execFile);
 
 const bot = new Telegraf(process.env.BOT_TOKEN);
 
 let groupChatId = -5157172835;
 const ADMIN_CHAT_ID = parseInt(process.env.ADMIN_CHAT_ID);
+const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
+const GROQ_API_KEY = process.env.GROQ_API_KEY;
 
-// Хранилище контекста диалогов (по ID пользователя)
+// Настройки пользователей (голосовой ответ вкл/выкл)
+const userSettings = new Map();
+
+function getVoiceMode(userId) {
+  return userSettings.get(userId) ?? true; // по умолчанию включено
+}
+
+// Хранилище контекста диалогов
 const conversationContext = new Map();
 
-// Функция для получения контекста пользователя
 function getUserContext(userId) {
   if (!conversationContext.has(userId)) {
-    conversationContext.set(userId, [
-      { role: 'system', content: 'Ты дружелюбный помощник. Сохраняй контекст диалога.' }
-    ]);
+    conversationContext.set(userId, []);
   }
-  return conversationContext.get(userId).slice(-10); // Берём до 10 последних сообщений
+  return conversationContext.get(userId).slice(-50);
+}
+
+// Синтез речи через Microsoft Edge TTS (Python)
+const __dirname = path.dirname(new URL(import.meta.url).pathname);
+
+async function textToSpeech(text) {
+  const tmpFile = path.join(os.tmpdir(), `tts_${Date.now()}.mp3`);
+  const scriptPath = path.join(__dirname, 'tts.py');
+
+  const child = execFile('python3', [scriptPath, tmpFile], { timeout: 15000 });
+  child.stdin.write(text);
+  child.stdin.end();
+
+  await new Promise((resolve, reject) => {
+    child.on('close', (code) => {
+      if (code === 0) resolve();
+      else reject(new Error(`TTS exited with code ${code}`));
+    });
+    child.on('error', reject);
+  });
+
+  const audioBuffer = fs.readFileSync(tmpFile);
+  fs.unlinkSync(tmpFile);
+  return audioBuffer;
+}
+
+// Распознавание речи через Groq Whisper
+async function recognizeSpeech(audioBuffer, filename) {
+  const form = new FormData();
+  form.append('file', audioBuffer, { filename: filename || 'voice.ogg', contentType: 'audio/ogg' });
+  form.append('model', 'whisper-large-v3');
+  form.append('language', 'ru');
+
+  const response = await axios.post('https://api.groq.com/openai/v1/audio/transcriptions', form, {
+    headers: {
+      'Authorization': `Bearer ${GROQ_API_KEY}`,
+      ...form.getHeaders(),
+    },
+    maxContentLength: Infinity,
+  });
+
+  return response.data.text;
+}
+
+// Ответ через OpenRouter AI
+async function getAIReply(userId, userMessage) {
+  if (!OPENROUTER_API_KEY) return null;
+
+  const userContext = getUserContext(userId);
+  const messages = [...userContext, { role: 'user', content: userMessage }];
+
+  const response = await axios.post(
+    'https://openrouter.ai/api/v1/chat/completions',
+    { model: 'openai/gpt-3.5-turbo', messages, max_tokens: 200 },
+    {
+      headers: {
+        'Authorization': `Bearer ${OPENROUTER_API_KEY}`,
+        'Content-Type': 'application/json',
+      },
+    }
+  );
+
+  const reply = response.data.choices[0]?.message?.content;
+
+  const ctx = conversationContext.get(userId) || [];
+  ctx.push({ role: 'user', content: userMessage });
+  ctx.push({ role: 'assistant', content: reply });
+  conversationContext.set(userId, ctx.slice(-50));
+
+  return reply;
+}
+
+// Отправка ответа — текстом или голосом
+async function sendReply(ctx, text) {
+  if (!text) return;
+
+  if (getVoiceMode(ctx.from.id)) {
+    try {
+      const audioBuffer = await textToSpeech(text);
+      await ctx.replyWithVoice({ source: audioBuffer, filename: 'reply.mp3' });
+    } catch (err) {
+      console.error('Ошибка TTS:', err.message);
+      await ctx.reply(text); // fallback на текст
+    }
+  } else {
+    await ctx.reply(text);
+  }
 }
 
 bot.command('start', (ctx) => {
-  ctx.reply('Бот запущен! Добавь меня в группу и дай права админа.');
+  ctx.reply(
+    'Бот запущен! Я могу отвечать на вопросы текстом и голосом.\n\n' +
+    'Команды:\n' +
+    '/voice — включить/выключить голосовые ответы\n' +
+    '/send <текст> — отправить сообщение в группу\n' +
+    '/chatid — показать ID чата'
+  );
+});
+
+bot.command('voice', (ctx) => {
+  const current = getVoiceMode(ctx.from.id);
+  userSettings.set(ctx.from.id, !current);
+  ctx.reply(`Голосовые ответы: ${!current ? '🔊 включены' : '🔇 выключены'}`);
 });
 
 bot.command('chatid', (ctx) => {
@@ -34,13 +142,9 @@ bot.command('chatid', (ctx) => {
 });
 
 bot.command('send', async (ctx) => {
-  if (!groupChatId) {
-    return ctx.reply('Группа ещё не найдена.');
-  }
+  if (!groupChatId) return ctx.reply('Группа ещё не найдена.');
   const text = ctx.message.text.replace(/^\/send\s*/, '').trim();
-  if (!text) {
-    return ctx.reply('Напиши: /send <текст сообщения>');
-  }
+  if (!text) return ctx.reply('Напиши: /send <текст сообщения>');
   try {
     await bot.telegram.sendMessage(groupChatId, text);
     await ctx.reply('Отправлено в группу!');
@@ -50,86 +154,45 @@ bot.command('send', async (ctx) => {
 });
 
 bot.on('message', async (ctx) => {
-  // Обработка групповых чатов
+  // Запоминаем группу
   if (ctx.chat.type === 'group' || ctx.chat.type === 'supergroup') {
     if (groupChatId !== ctx.chat.id) {
       groupChatId = ctx.chat.id;
       console.log(`Группа найдена: "${ctx.chat.title}" (ID: ${groupChatId})`);
     }
+    return;
   }
-  
-  // Обработка голосовых сообщений
+
+  // Голосовое сообщение
   if (ctx.message.voice) {
     try {
-      const voice = ctx.message.voice;
-      const file_id = voice.file_id;
-      
-      console.log('Получено голосовое сообщение:', file_id);
-      
-      // Скачиваем голосовое сообщение
-      const fileUrl = await bot.telegram.getFileLink(file_id);
-      
-      // Скачиваем аудио
-      const response = await axios.get(fileUrl, { responseType: 'arraybuffer' });
+      console.log('Получено голосовое сообщение');
+      const fileLink = await bot.telegram.getFileLink(ctx.message.voice.file_id);
+      const response = await axios.get(fileLink.href, { responseType: 'arraybuffer' });
       const audioBuffer = Buffer.from(response.data);
-      
-      // Простой текстовый ответ (пока без распознавания речи)
-      // Отправляем текстовое сообщение
-      let botReply = "Вы отправили голосовое сообщение. Распознавание речи в разработке...";
-      
-      // Если есть OpenRouter API ключ, можем использовать LLM для ответа
-      if (OPENROUTER_API_KEY) {
-        try {
-          const userContext = getUserContext(ctx.from.id);
-          const messages = [
-            ...userContext,
-            { role: 'user', content: 'Пользователь отправил голосовое сообщение. Дай короткий вежливый ответ.' }
-          ];
-          
-          const response = await axios.post(
-            'https://openrouter.ai/api/v1/chat/completions',
-            {
-              model: 'openai/gpt-3.5-turbo',  // Бесплатная модель OpenRouter
-              messages: messages,
-              max_tokens: 100
-            },
-            {
-              headers: {
-                'Authorization': `Bearer ${OPENROUTER_API_KEY}`,
-                'Content-Type': 'application/json',
-                'HTTP-Referer': 'https://t.me/your_bot',
-                'X-Title': 'Telegram Voice Bot'
-              }
-            }
-          );
-          
-          botReply = response.data.choices[0]?.message?.content || botReply;
-           console.log('OpenRouter response:', botReply);
-           
-           // Сохраняем ответ в контекст
-           const userCtx = conversationContext.get(ctx.from.id) || [];
-           userCtx.push({ role: 'assistant', content: botReply });
-           conversationContext.set(ctx.from.id, userCtx.slice(-10));
-         } catch (err) {
-          console.log('OpenRouter API error:', err.message);
-          if (err.response) {
-            console.log('Error details:', JSON.stringify(err.response.data, null, 2));
-          }
-        }
-      }
-      
-      // Отправляем текстовый ответ
-      await ctx.reply(botReply);
-      
-      // И также голосовое сообщение обратно
-      await ctx.replyWithVoice(file_id, {
-        caption: 'Ваше голосовое сообщение'
-      });
+
+      const recognizedText = await recognizeSpeech(audioBuffer, 'voice.ogg');
+      console.log('Распознано:', recognizedText);
+
+      await ctx.reply(`🎤 "${recognizedText}"`);
+
+      const aiReply = await getAIReply(ctx.from.id, recognizedText);
+      if (aiReply) await sendReply(ctx, aiReply);
     } catch (err) {
-      console.error('Ошибка:', err);
-      try {
-        await ctx.reply('Не удалось обработать голосовое сообщение');
-      } catch (e) {}
+      console.error('Ошибка голоса:', err.message);
+      await ctx.reply('Не удалось распознать голосовое сообщение').catch(() => {});
+    }
+    return;
+  }
+
+  // Текстовое сообщение (только в личке)
+  if (ctx.message.text && ctx.chat.type === 'private') {
+    try {
+      const aiReply = await getAIReply(ctx.from.id, ctx.message.text);
+      await sendReply(ctx, aiReply || 'Не удалось получить ответ');
+    } catch (err) {
+      console.error('Ошибка AI:', err.message);
+      await ctx.reply('Ошибка при обработке сообщения').catch(() => {});
     }
   }
 });
@@ -141,18 +204,5 @@ if (ADMIN_CHAT_ID) {
   bot.telegram.sendMessage(ADMIN_CHAT_ID, 'Бот запущен!').catch(() => {});
 }
 
-process.once('SIGINT', () => {
-  bot.stop('SIGINT');
-  console.log('Бот завершён!');
-  if (ADMIN_CHAT_ID) {
-    bot.telegram.sendMessage(ADMIN_CHAT_ID, 'Бот завершён!').catch(() => {});
-  }
-});
-
-process.once('SIGTERM', () => {
-  bot.stop('SIGTERM');
-  console.log('Бот завершён!');
-  if (ADMIN_CHAT_ID) {
-    bot.telegram.sendMessage(ADMIN_CHAT_ID, 'Бот завершён!').catch(() => {});
-  }
-});
+process.once('SIGINT', () => bot.stop('SIGINT'));
+process.once('SIGTERM', () => bot.stop('SIGTERM'));
