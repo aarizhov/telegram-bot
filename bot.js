@@ -3,8 +3,10 @@ import 'dotenv/config';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import axios from 'axios';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
 
 const bot = new Telegraf(process.env.BOT_TOKEN);
 
@@ -35,7 +37,8 @@ bot.command('send', async (ctx) => {
   }
 });
 
-bot.on('message', (ctx) => {
+bot.on('message', async (ctx) => {
+  // Обработка групповых чатов
   if (ctx.chat.type === 'group' || ctx.chat.type === 'supergroup') {
     if (groupChatId !== ctx.chat.id) {
       groupChatId = ctx.chat.id;
@@ -45,27 +48,62 @@ bot.on('message', (ctx) => {
   
   // Обработка голосовых сообщений
   if (ctx.message.voice) {
-    ctx.reply('Получил голосовое сообщение! Обрабатываю...');
-    
-    const voice = ctx.message.voice;
-    const file_id = voice.file_id;
-    
-    // Получаем информацию о файле
-    bot.telegram.getFile(file_id)
-      .then(file => {
-        // Скачиваем файл
-        const url = file.getFileLink(process.env.BOT_TOKEN);
-        console.log(`Скачиваем файл: ${url}`);
-        
-        // Отправляем обратно с ответом
-        ctx.replyWithVoice(file_id, {
-          caption: 'Это ваше голосовое сообщение!'
-        });
-      })
-      .catch(err => {
-        console.error('Ошибка обработки голоса:', err.message);
-        ctx.reply('Не удалось обработать голосовое сообщение');
+    try {
+      const voice = ctx.message.voice;
+      const file_id = voice.file_id;
+      
+      console.log('Получено голосовое сообщение:', file_id);
+      
+      // Скачиваем голосовое сообщение
+      const file = await bot.telegram.getFile(file_id);
+      const fileUrl = file.getFileLink(process.env.BOT_TOKEN);
+      
+      // Скачиваем аудио
+      const response = await axios.get(fileUrl, { responseType: 'arraybuffer' });
+      const audioBuffer = Buffer.from(response.data);
+      
+      // Простой текстовый ответ (пока без распознавания речи)
+      // Отправляем текстовое сообщение
+      let botReply = "Вы отправили голосовое сообщение. Распознавание речи в разработке...";
+      
+      // Если есть OpenRouter API ключ, можем использовать LLM для ответа
+      if (OPENROUTER_API_KEY) {
+        try {
+          const response = await axios.post(
+            'https://openrouter.ai/api/v1/chat/completions',
+            {
+              model: 'google/gemini-2.0-flash',
+              messages: [
+                { role: 'user', content: 'Пользователь отправил голосовое сообщение. Дай вежливый текстовый ответ.' }
+              ]
+            },
+            {
+              headers: {
+                'Authorization': `Bearer ${OPENROUTER_API_KEY}`,
+                'Content-Type': 'application/json'
+              }
+            }
+          );
+          
+          botReply = response.data.choices[0]?.message?.content || botReply;
+        } catch (err) {
+          console.log('OpenRouter API error:', err.message);
+        }
+      }
+      
+      // Отправляем текстовый ответ
+      await ctx.reply(botReply);
+      
+      // И также голосовое сообщение обратно
+      await ctx.replyWithVoice(file_id, {
+        caption: 'Ваше голосовое сообщение'
       });
+    } catch (err) {
+      console.error('Ошибка:', err);
+      try {
+        await ctx.reply('Не удалось обработать голосовое сообщение');
+      } catch (e) {}
+    }
   }
 });
 
