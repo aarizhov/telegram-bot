@@ -46,5 +46,18 @@ if (ADMIN_CHAT_ID) {
   bot.telegram.sendMessage(ADMIN_CHAT_ID, 'Бот запущен!').catch(() => {});
 }
 
-process.once('SIGINT', () => bot.stop('SIGINT'));
-process.once('SIGTERM', () => bot.stop('SIGTERM'));
+process.once('SIGINT', () => {
+  bot.stop('SIGINT');
+  console.log('Бот завершён!');
+  if (ADMIN_CHAT_ID) {
+    bot.telegram.sendMessage(ADMIN_CHAT_ID, 'Бот завершён!').catch(() => {});
+  }
+});
+
+process.once('SIGTERM', () => {
+  bot.stop('SIGTERM');
+  console.log('Бот завершён!');
+  if (ADMIN_CHAT_ID) {
+    bot.telegram.sendMessage(ADMIN_CHAT_ID, 'Бот завершён!').catch(() => {});
+  }
+});
