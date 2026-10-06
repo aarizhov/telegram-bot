@@ -1,5 +1,10 @@
 import { Telegraf } from 'telegraf';
 import 'dotenv/config';
+import fs from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const bot = new Telegraf(process.env.BOT_TOKEN);
 
@@ -36,6 +41,31 @@ bot.on('message', (ctx) => {
       groupChatId = ctx.chat.id;
       console.log(`Группа найдена: "${ctx.chat.title}" (ID: ${groupChatId})`);
     }
+  }
+  
+  // Обработка голосовых сообщений
+  if (ctx.message.voice) {
+    ctx.reply('Получил голосовое сообщение! Обрабатываю...');
+    
+    const voice = ctx.message.voice;
+    const file_id = voice.file_id;
+    
+    // Получаем информацию о файле
+    bot.telegram.getFile(file_id)
+      .then(file => {
+        // Скачиваем файл
+        const url = file.getFileLink(process.env.BOT_TOKEN);
+        console.log(`Скачиваем файл: ${url}`);
+        
+        // Отправляем обратно с ответом
+        ctx.replyWithVoice(file_id, {
+          caption: 'Это ваше голосовое сообщение!'
+        });
+      })
+      .catch(err => {
+        console.error('Ошибка обработки голоса:', err.message);
+        ctx.reply('Не удалось обработать голосовое сообщение');
+      });
   }
 });
 
