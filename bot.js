@@ -72,20 +72,26 @@ bot.on('message', async (ctx) => {
             {
               model: 'google/gemini-2.0-flash',
               messages: [
-                { role: 'user', content: 'Пользователь отправил голосовое сообщение. Дай вежливый текстовый ответ.' }
+                { role: 'user', content: 'Пользователь отправил голосовое сообщение. Дай короткий вежливый текстовый ответ.' }
               ]
             },
             {
               headers: {
                 'Authorization': `Bearer ${OPENROUTER_API_KEY}`,
-                'Content-Type': 'application/json'
+                'Content-Type': 'application/json',
+                'HTTP-Referer': 'https://t.me/your_bot',
+                'X-Title': 'Telegram Voice Bot'
               }
             }
           );
           
           botReply = response.data.choices[0]?.message?.content || botReply;
+          console.log('OpenRouter response:', botReply);
         } catch (err) {
           console.log('OpenRouter API error:', err.message);
+          if (err.response) {
+            console.log('Error details:', JSON.stringify(err.response.data, null, 2));
+          }
         }
       }
       
